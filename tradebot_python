@@ -1,0 +1,150 @@
+from binance.client import Client
+import random
+import time
+import sys
+
+#create client instance to connect to Binance
+def client_init(api_key,api_secret):
+  client=Client(api_key,api_secret)
+  return client
+
+#get asset tickers to analyze which asset to buy
+def get_best_asset(client,*tick_out):
+  symbol_get=['nomatch']   #initate symbol_get with no match, if there's no match symbol return 'nomatch'
+  kline5isRed=False  #to determine whether the 5min kline is positive pricechange
+  min5_RISE_per=0.0  #5min pricechange percentage
+  symbol_collect=client.get_all_tickers() 
+  for symbol_fliter in symbol_collect:
+    # fliter the BTC trade pairs, and tick out the 'BTCUSDT'/ tick_out element
+    if ('BTC' in symbol_fliter['symbol']) and (symbol_fliter['symbol']!='BTCUSDT') and (symbol_fliter['symbol'] not in tick_out):
+      # middle price of recent day kline 0.37x above the lowprice & 0.37x above lastprice/openprice
+      ticker_24h=client.get_ticker(symbol=symbol_fliter['symbol'])
+      h24_high_low_37per=float(ticker_24h['lowPrice'])+0.37*(float(ticker_24h['highPrice'])-float(ticker_24h['lowPrice']))
+      h24_open_close_37per=min(float(ticker_24h['openPrice']),float(ticker_24h['lastPrice']))+0.37*abs(float(ticker_24h['openPrice'])-float(ticker_24h['lastPrice']))
+      h24_price=(h24_high_low_37per+h24_open_close_37per)/2
+      #//print(symbol_fliter["symbol"]+" 24h price is ",h24_price)
+      ##
+      #the structure of get_klines response:
+      #[
+      #  [
+      #1499040000000,      // Open time
+      #"0.01634790",       // Open
+      #"0.80000000",       // High
+      #"0.01575800",       // Low
+      #"0.01577100",       // Close
+      #"148976.11427815",  // Volume
+      #1499644799999,      // Close time
+      #"2434.19055334",    // Quote asset volume
+      #308,                // Number of trades
+      #"1756.87402397",    // Taker buy base asset volume
+      #"28.46694368",      // Taker buy quote asset volume
+      #"17928899.62484339" // Ignore
+      #    ]
+      #]
+      # middle price of recent 30min kline 0.37x above the lowprice & 0.37x above lastprice/openprice
+      ticker_30min = client.get_klines(symbol=symbol_fliter['symbol'], interval=Client.KLINE_INTERVAL_30MINUTE)
+      min30_high_low_37per=float(ticker_30min[0][3])+0.37*(float(ticker_30min[0][2])-float(ticker_30min[0][3]))
+      min30_open_close_37per=min(float(ticker_30min[0][1]),float(ticker_30min[0][4]))+0.37*abs(float(ticker_30min[0][1])-float(ticker_30min[0][4]))
+      min30_price=(min30_high_low_37per+min30_open_close_37per)/2
+      #//print('   min30_price is: ', min30_price)
+      # 5min kline data
+      ticker_5min = client.get_klines(symbol=symbol_fliter['symbol'], interval=Client.KLINE_INTERVAL_5MINUTE)
+      min5_low_price=float(ticker_5min[0][3])
+      # calc the 5min price change percentage and specify positive flag 'kline5isRed'
+      if (float(ticker_5min[0][4])-float(ticker_5min[0][1])) > 0.0:
+         min5_RISE_per=(float(ticker_5min[0][4])-float(ticker_5min[0][1]))/float(ticker_5min[0][1])
+         if min5_RISE_per>0.015:
+              kline5isRed=True
+      else: min5_RISE_per=0.0
+      #//print("   "+str(min5_RISE_per))
+      # *****************get the matching symbol*************************************
+      if (h24_price > min30_price) and (min5_low_price > min30_price) and kline5isRed:
+          if 'nomatch' in symbol_get:
+            del symbol_get[0]
+          symbol_get.append(symbol_fliter['symbol'])
+          kline5isRed=False
+  return symbol_get
+
+#buy the best_asset with all spare BTC balance
+def buy_order(client,symbol_buy):
+  #calc the price and amount to buy
+  symbol_price = client.get_symbol_ticker(symbol=symbol_buy)['price']
+  BTC_balance = client.get_asset_balance(asset='BTC')['free']
+  amount_to_buy = float(BTC_balance)/float(symbol_price)
+  if amount_to_buy > 100:
+    amount_to_buy = round(amount_to_buy)
+  else:
+    amount_to_buy = round(amount_to_buy, 2)
+  # **********************post buy order**********************************************
+  order_buy = client.order_limit_buy(
+    symbol = symbol_buy,
+    quantity = amount_to_buy,
+    price = symbol_price)
+  return order_buy
+
+#analyze the profit or lost to determin whether to stop reduce/earns
+def calc_profit(client,symbol_bought,bought_price):
+  symbol_price = float(client.get_symbol_ticker(symbol=symbol_bought)['price'])
+  profit = (symbol_price - bought_price)/bought_price
+  return profit
+
+#according to calc_profi(), sell asset
+def sell_order(client,symbol_sell,symbol_price,amount_to_sell):
+  order_sell = client.order_limit_sell(
+    symbol = symbol_sell,
+    quantity = amount_to_sell,
+    price = symbol_price)
+  return order_sell
+
+#prepare for next buy/sell order cycle
+def next_cycle():
+  return
+#/////////////////////////////////TRADE BOT V0.1/////////////////////////////////////////
+runFlag=True   
+c=0
+API_KEY=''
+API_SECRET=''
+client=client_init(API_KEY,API_SECRET)
+print('client connected')
+symbol=[]
+c=0
+while runFlag:
+  c+=1
+  symbol=get_best_asset(client,['TNBBTC'])
+  if c >10:
+    print("\n")
+    c=0
+  print(symbol)
+  if 'nomatch' in symbol:
+    print("nomatch",end=" ")
+    print('+',end=' ')
+    sys.stdout.flush()
+    continue
+  else:
+    symbol_to_buy=random.choice(symbol)
+    #*****************buy order**********************
+  order_buy = buy_order(client,symbol_to_buy)
+  while True:
+    if order_buy['status'] == 'FILLED':
+      break
+  bought_price = float(order_buy['price'])
+  bought_amount = float(order_buy['executedQty'])
+  print(symbol_to_buy+"buy order filled",bought_amount,bought_price)
+  sys.stdout.flush()
+  symbol_to_sell = symbol_to_buy
+  while True:
+    if calc_profit(client,symbol_to_sell,bought_price) > 0.03:
+      sell_price = client.get_symbol_ticker(symbol=symbol_to_sell)['price']
+      order_sell = sell_order(client,symbol_to_sell, sell_price, bought_amount)
+      break
+    time.sleep(2)
+  print("profit over 3%, sell order put")
+  sys.stdout.flush()
+  while True:
+    if order_sell['status'] == 'FILLED' :
+      next_cycle()
+      break
+  print("sell order filled, start next cycle at:" + time.ctime())
+  sys.stdout.flush()
+  #oderTNBsell=client.order_limit_sell(symbol='TNBBTC',quantity=1000,price='0.00000654')
+
