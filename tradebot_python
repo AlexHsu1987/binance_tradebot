@@ -2,6 +2,7 @@ from binance.client import Client
 import random
 import time
 import sys
+import copy
 
 #create client instance to connect to Binance
 def client_init(api_key,api_secret):
@@ -51,9 +52,9 @@ def get_best_asset(client,*tick_out):
       ticker_5min = client.get_klines(symbol=symbol_fliter['symbol'], interval=Client.KLINE_INTERVAL_5MINUTE)
       min5_low_price=float(ticker_5min[0][3])
       # calc the 5min price change percentage and specify positive flag 'kline5isRed'
-      if (float(ticker_5min[0][4])-float(ticker_5min[0][1])) > 0.0:
+      if (float(ticker_5min[0][4])-float(ticker_5min[0][1])) < 0.0:
          min5_RISE_per=(float(ticker_5min[0][4])-float(ticker_5min[0][1]))/float(ticker_5min[0][1])
-         if min5_RISE_per>0.015:
+         if min5_RISE_per < -0.01:
               kline5isRed=True
       else: min5_RISE_per=0.0
       #//print("   "+str(min5_RISE_per))
@@ -67,19 +68,28 @@ def get_best_asset(client,*tick_out):
 
 #buy the best_asset with all spare BTC balance
 def buy_order(client,symbol_buy):
+  market=True
   #calc the price and amount to buy
   symbol_price = client.get_symbol_ticker(symbol=symbol_buy)['price']
-  BTC_balance = client.get_asset_balance(asset='BTC')['free']
-  amount_to_buy = float(BTC_balance)/float(symbol_price)
+  buy_price = copy.deepcopy(symbol_price)
+  BTC_balance = str(0.9*float(client.get_asset_balance(asset='BTC')['free']))
+  amount_to_buy = float(BTC_balance)/float(buy_price)
   if amount_to_buy > 100:
     amount_to_buy = round(amount_to_buy)
   else:
     amount_to_buy = round(amount_to_buy, 2)
   # **********************post buy order**********************************************
-  order_buy = client.order_limit_buy(
-    symbol = symbol_buy,
-    quantity = amount_to_buy,
-    price = symbol_price)
+  if market:
+    order_buy = client.order_market_buy(
+      symbol = symbol_buy,
+      quantity = amount_to_buy,
+      newOrderRespType = 'FULL')
+  else:
+    order_buy = client.order_limit_buy(
+      symbol = symbol_buy,
+      quantity = amount_to_buy,
+      price = buy_price,
+      newOrderRespType = 'FULL')
   return order_buy
 
 #analyze the profit or lost to determin whether to stop reduce/earns
@@ -106,45 +116,64 @@ API_KEY=''
 API_SECRET=''
 client=client_init(API_KEY,API_SECRET)
 print('client connected')
+sys.stdout.flush()
 symbol=[]
 c=0
+times_for_waitout = 0
+BTC_balance_init = client.get_asset_balance(asset='BTC')['free']
 while runFlag:
   c+=1
   symbol=get_best_asset(client,['TNBBTC'])
   if c >10:
-    print("\n")
-    c=0
-  print(symbol)
+    pass
   if 'nomatch' in symbol:
     print("nomatch",end=" ")
-    print('+',end=' ')
     sys.stdout.flush()
     continue
   else:
+    print("+ ",symbol)
     symbol_to_buy=random.choice(symbol)
     #*****************buy order**********************
   order_buy = buy_order(client,symbol_to_buy)
   while True:
     if order_buy['status'] == 'FILLED':
       break
-  bought_price = float(order_buy['price'])
   bought_amount = float(order_buy['executedQty'])
-  print(symbol_to_buy+"buy order filled",bought_amount,bought_price)
+  #bought_price = float(order_buy['price'])
+  #calculate filled average price
+  total_cost = 0.0
+  for avg in order_buy['fills']:
+    total_cost += float(avg['price'])*float(avg['qty'])
+  bought_price = total_cost/bought_amount
+  #################################
+  print(symbol_to_buy+"buy order filled",bought_amount,bought_price,time.ctime())
   sys.stdout.flush()
   symbol_to_sell = symbol_to_buy
+  start_time = time.time()
+  order_sell = {}
   while True:
-    if calc_profit(client,symbol_to_sell,bought_price) > 0.03:
+    if (calc_profit(client,symbol_to_sell,bought_price) > 0.02) or (calc_profit(client,symbol_to_sell,bought_price) < -0.015):
       sell_price = client.get_symbol_ticker(symbol=symbol_to_sell)['price']
       order_sell = sell_order(client,symbol_to_sell, sell_price, bought_amount)
       break
-    time.sleep(2)
-  print("profit over 3%, sell order put")
+    elif (time.time() - start_time) > 600:
+      print("wait for too long, sell")
+      sys.stdout.flush()
+      long_wait=True
+      times_for_waitout +=1
+      sell_price = client.get_symbol_ticker(symbol=symbol_to_sell)['price']
+      order_sell = sell_order(client,symbol_to_sell, sell_price, bought_amount)
+      break
+  if long_wait:
+    print("sorry waiting for %d times"%times_for_waitout)
+  else:
+    print("profit over 3%, sell order put")
   sys.stdout.flush()
   while True:
     if order_sell['status'] == 'FILLED' :
       next_cycle()
       break
   print("sell order filled, start next cycle at:" + time.ctime())
+  BTC_balance_check = client.get_asset_balance(asset='BTC')['free']
+  print(str((float(BTC_balance_init)-float(BTC_balance_check))/float(BTC_balance_init)))
   sys.stdout.flush()
-  #oderTNBsell=client.order_limit_sell(symbol='TNBBTC',quantity=1000,price='0.00000654')
-
