@@ -4,6 +4,7 @@ import time
 import sys
 import copy
 
+
 #create client instance to connect to Binance
 def client_init(api_key,api_secret):
   client=Client(api_key,api_secret)
@@ -72,12 +73,12 @@ def buy_order(client,symbol_buy):
   #calc the price and amount to buy
   symbol_price = client.get_symbol_ticker(symbol=symbol_buy)['price']
   buy_price = copy.deepcopy(symbol_price)
-  BTC_balance = str(0.9*float(client.get_asset_balance(asset='BTC')['free']))
+  BTC_balance = str(float(client.get_asset_balance(asset='BTC')['free'])*0.95)
   amount_to_buy = float(BTC_balance)/float(buy_price)
   if amount_to_buy > 100:
-    amount_to_buy = round(amount_to_buy)
+    amount_to_buy = round(amount_to_buy)-1
   else:
-    amount_to_buy = round(amount_to_buy, 2)
+    amount_to_buy = round(amount_to_buy, 2)-0.01
   # **********************post buy order**********************************************
   if market:
     order_buy = client.order_market_buy(
@@ -98,18 +99,40 @@ def calc_profit(client,symbol_bought,bought_price):
   profit = (symbol_price - bought_price)/bought_price
   return profit
 
-#according to calc_profi(), sell asset
-def sell_order(client,symbol_sell,symbol_price,amount_to_sell):
-  order_sell = client.order_limit_sell(
-    symbol = symbol_sell,
-    quantity = amount_to_sell,
-    price = symbol_price)
+#according to calc_profit(), sell asset
+def sell_order(client,symbol_sell,symbol_price,amount_to_sell,sell_type='limit'):
+  if sell_type == 'market':
+    order_sell = client.order_market_sell(
+      symbol = symbol_sell,
+      quantity = amount_to_sell)
+  else:
+    order_sell = client.order_limit_sell(
+      symbol = symbol_sell,
+      quantity = amount_to_sell,
+      price = symbol_price)
   return order_sell
 
+#calculate the proper amount of sell order
+def sell_amount(client,symbol_pair,asset_symbol,sell_per):
+  amount = float(client.get_asset_balance(asset=asset_symbol)['free'])
+  pair_info = client.get_symbol_info(symbol_pair)
+  asset_minQty = ''
+  for get_minQty in pair_info['filters']:
+    if get_minQty['filterType'] == 'LOT_SIZE':
+      asset_minQty = float(get_minQty['minQty'])
+      break
+  if asset_minQty == '':
+    asset_minQty = 1.0
+  amount = (amount//asset_minQty)*asset_minQty
+  if sell_per != 'all' and sell_per != 'ALL':
+    amount = float(sell_per)*amount
+  return amount
+  
 #prepare for next buy/sell order cycle
 def next_cycle():
   return
-#/////////////////////////////////TRADE BOT V0.1/////////////////////////////////////////
+#/////////////////////////////////TRADE BOT V1.0/////////////////////////////////////////
+print("###############################BOT Start Time##############################"+time.ctime())
 runFlag=True   
 c=0
 API_KEY=''
@@ -123,6 +146,7 @@ times_for_waitout = 0
 BTC_balance_init = client.get_asset_balance(asset='BTC')['free']
 while runFlag:
   c+=1
+  BTC_balance_current = client.get_asset_balance(asset='BTC')['free']
   symbol=get_best_asset(client,['TNBBTC'])
   if c >10:
     pass
@@ -133,7 +157,7 @@ while runFlag:
   else:
     print("+ ",symbol)
     symbol_to_buy=random.choice(symbol)
-    #*****************buy order**********************
+  #*****************buy order**********************
   order_buy = buy_order(client,symbol_to_buy)
   while True:
     if order_buy['status'] == 'FILLED':
@@ -145,35 +169,47 @@ while runFlag:
   for avg in order_buy['fills']:
     total_cost += float(avg['price'])*float(avg['qty'])
   bought_price = total_cost/bought_amount
+  if 'BTC' in symbol_to_buy:
+    bought_asset = symbol_to_buy[:-3]
   #################################
   print(symbol_to_buy+"buy order filled",bought_amount,bought_price,time.ctime())
   sys.stdout.flush()
   symbol_to_sell = symbol_to_buy
   start_time = time.time()
-  order_sell = {}
   while True:
-    if (calc_profit(client,symbol_to_sell,bought_price) > 0.02) or (calc_profit(client,symbol_to_sell,bought_price) < -0.015):
+    profit_current = calc_profit(client,symbol_to_sell,bought_price)
+    if (profit_current > 0.02) or (profit_current < -0.01):
+      to_sell_amount = sell_amount(client,symbol_to_sell,bought_asset,'ALL')
       sell_price = client.get_symbol_ticker(symbol=symbol_to_sell)['price']
-      order_sell = sell_order(client,symbol_to_sell, sell_price, bought_amount)
+      order_sell = sell_order(client,symbol_to_sell, sell_price, to_sell_amount,'market')
       break
-    elif (time.time() - start_time) > 600:
+    elif (time.time() - start_time) > 1800:  # after N second, if frofit or stopprice not match, then sell at the current price
       print("wait for too long, sell")
       sys.stdout.flush()
       long_wait=True
       times_for_waitout +=1
       sell_price = client.get_symbol_ticker(symbol=symbol_to_sell)['price']
-      order_sell = sell_order(client,symbol_to_sell, sell_price, bought_amount)
+      # this kind of sell amount will sell the specified asset which exists before buying
+      # sell_amount = round(float(client.get_asset_balance(asset=bought_asset)['free']),2)-0.01
+      # with sell_amount function, fix the LOT_SIZE error
+      to_sell_amount = sell_amount(client,symbol_to_sell,bought_asset,'ALL')
+      print('sell amount and price: ',sell_amount, sell_price)   
+      sys.stdout.flush()   
+      order_sell = sell_order(client,symbol_to_sell, sell_price, to_sell_amount)
       break
+    time.sleep(2)
   if long_wait:
     print("sorry waiting for %d times"%times_for_waitout)
   else:
     print("profit over 3%, sell order put")
   sys.stdout.flush()
   while True:
-    if order_sell['status'] == 'FILLED' :
+    #if order_sell['status'] == 'FILLED' :
+    if client.get_open_orders(symbol=symbol_to_sell) == []:
       next_cycle()
       break
   print("sell order filled, start next cycle at:" + time.ctime())
   BTC_balance_check = client.get_asset_balance(asset='BTC')['free']
-  print(str((float(BTC_balance_init)-float(BTC_balance_check))/float(BTC_balance_init)))
+  print('the current cycle profit percent: %f%%'%(round((float(BTC_balance_check)-float(BTC_balance_current))/float(BTC_balance_current),5)*100))
+  print('the total profit percent: %f%%'%(round((float(BTC_balance_check)-float(BTC_balance_init))/float(BTC_balance_init),5)*100))
   sys.stdout.flush()
